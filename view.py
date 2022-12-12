@@ -1,12 +1,13 @@
 import json
 import sys
 import time
+import math
+import traceback
 import pandas as pd
-import datacompy
 import PyQt6.QtGui as QtGui
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QSpinBox, QPushButton, QScrollArea, QVBoxLayout, QWidget, QLineEdit, QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QFileDialog, QDialog, QFormLayout, QComboBox
-from PyQt6.QtCore import Qt, QThreadPool, QThread, QRunnable, pyqtSignal, QUrl, QDir, QSize
+from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QSpinBox, QPushButton, QScrollArea, QVBoxLayout, QWidget, QLineEdit, QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QFileDialog, QDialog, QFormLayout, QComboBox, QMessageBox
+from PyQt6.QtCore import QThread, pyqtSignal, QSize
 
 class ThreadDataProcess(QThread):
     def __init__(self, view):
@@ -29,12 +30,12 @@ class ThreadDataInit(QThread):
         self.signal_complete.emit(self.view.data_init())
 
 
-class FilterDialog(QDialog):
+class FunctionDialog(QDialog):
     signal_configuring = pyqtSignal()
 
-    def __init__(self, parent):
+    def __init__(self, parent, width = 600, height = 400):
         super().__init__(parent)
-        self.resize(QSize(600, 400))
+        self.resize(QSize(width, height))
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent):
         self.signal_configuring.emit()
@@ -85,8 +86,10 @@ class View(QMainWindow):
         self.current_section = 0
 
         ## 当前页面行数
-        # self.current_line_num = 0
+        self.current_line_num = 0
 
+        ## 文件是否存在表头
+        self.has_header = False
         ## 文件总行数
         self.max_line_num = 0
         ## 文件最大索引
@@ -127,9 +130,14 @@ class View(QMainWindow):
         self.label_condition_cache = {}
 
         self.combobox_condition_recover_cache = {}
+        # 保存 index
         self.input_condition_recover_cache = {}
         self.checkbox_condition_recover_cache = {}
         self.label_condition_recover_cache = {}
+
+        self.basic_data_type = ["int32", "int64", "float64", "str"]
+        self.combobox_edit_cache = {}
+        self.combobox_edit_recover_cache = {}
 
         ## 对话框
         ### 文件对话框
@@ -147,13 +155,23 @@ class View(QMainWindow):
         self.widget_center = QWidget(self)
         ## 按钮
         ### 打开文件
+        #### 数据结构文件
         self.button_open_data_struct_file = QPushButton("Open...")
         self.button_open_data_struct_file.setToolTip("打开一个JSON格式的数据结构文件")
+        #### 数据文件
         self.button_open_file = QPushButton("Open...")
         self.button_open_file.setToolTip("打开一个csv格式的数据文件，需与数据结构匹配")
         ### 生成数据结构
         self.button_generate_data_struct = QPushButton("Generate")
         self.button_generate_data_struct.setToolTip("根据csv数据文件表头生成数据结构")
+        #### 根据是否存在表头设置
+        self.button_generate_data_struct.setEnabled(self.has_header)
+        ### 编辑数据结构
+        self.button_edit_data_struct = QPushButton("Edit")
+        self.button_edit_data_struct.setToolTip("编辑数据结构")
+        ### 刷新
+        self.button_refresh = QPushButton("Refresh")
+        self.button_refresh.setToolTip("刷新数据")
         ### 筛选数据
         self.button_filter = QPushButton("Filter")
         self.button_filter.setToolTip("设定字段筛选条件")
@@ -177,12 +195,24 @@ class View(QMainWindow):
         self.button_execute = QPushButton("Execute")
         self.button_execute.setToolTip("执行筛选")
 
+        ### 数据结构编辑对话框
+        self.button_save = QPushButton("Save Structure")
+        self.button_save.setToolTip("保存数据结构")
+        self.button_recover_struct = QPushButton("Recover Structure")
+        self.button_recover_struct.setToolTip("还原上一次保存的数据结构")
+
         ### 参数配置 设置参数
-        self.button_apply_param = QPushButton("Apply")
+        self.button_apply_param = QPushButton("Apply Parameter")
         self.button_apply_param.setToolTip("应用参数配置（配置未修改时不会重新解析数据）")
         ### 参数配置 重置参数
-        self.button_reset_param = QPushButton("Reset")
+        self.button_reset_param = QPushButton("Reset Parameter")
         self.button_reset_param.setToolTip("重置参数配置并应用")
+
+        ## 单选框
+        ### 数据文件是否存在表头
+        self.checkbox_has_header = QCheckBox("Header")
+        self.checkbox_has_header.setToolTip("数据文件是否包含表头")
+        self.checkbox_has_header.setChecked(False)
 
         ## 标签
         self.label_status = QLabel("Ok.")
@@ -221,6 +251,9 @@ class View(QMainWindow):
         ## 文件总行数
         self.label_max_line_num = QLabel("0")
         self.label_max_line_num.setToolTip("文件行数")
+        ## 当前 section 行数
+        self.label_current_line_num = QLabel("0")
+        self.label_current_line_num.setToolTip("当前文件块起始行数")
 
         # 进度条
         ## 数据处理进度
@@ -259,16 +292,39 @@ class View(QMainWindow):
         self.page_sections = []
         # self.page_line_amounts = []
         self.current_section = self.begin_section - 1
-        # self.current_line_num = 0
+        self.current_line_num = 0
+
+        self.label_page_num.setText("1")
         # self.max_line_num = 0
+
+    def data_struct_reset(self):
+        self.combobox_condition_cache = {}
+        self.input_condition_cache = {}
+        self.checkbox_condition_cache = {}
+        self.label_condition_cache = {}
+
+        self.combobox_condition_recover_cache = {}
+        self.input_condition_recover_cache = {}
+        self.checkbox_condition_recover_cache = {}
+        self.label_condition_recover_cache = {}
+
+        self.combobox_edit_cache = {}
+        self.combobox_edit_recover_cache = {}
 
     # 数据初始化 默认值（配置文件）
     def data_struct_init(self):
         self.data_struct = {}
-        self.table_labels = []
 
+        self.table_labels = []
         self.table_hidden_column = []
 
+        # 初始化表头选项
+        if self.data_struct_path == "generate_data_struct.json":
+            self.has_header = True
+            self.checkbox_has_header.setChecked(True)
+        else:
+            self.has_header = False
+            self.checkbox_has_header.setChecked(False)
         # 配置文件
         ## 设置数据类型及表格表头
         with open(file=self.data_struct_path, mode='r+') as data_struct_json:
@@ -284,6 +340,10 @@ class View(QMainWindow):
             with open(file="./cache.json", mode='r+') as cache_json:
                 cache = json.load(cache_json)
                 self.data_struct_path = cache['data_struct_path']
+                self.current_data_struct_path = self.data_struct_path
+                self.current_data_path = cache['data_path']
+
+                self.data_struct_reset()
                 self.data_struct_init()
         except FileNotFoundError:
             self.label_status.setText("Cache recover failed.")
@@ -291,6 +351,8 @@ class View(QMainWindow):
             self.label_status.setText("Cache recover failed.")
 
     def data_read(self, skiprows, nrows):
+        if self.has_header:
+            skiprows += 1
         return pd.read_csv(self.data_path, header=None, names=self.table_labels, dtype=self.data_struct, skiprows=skiprows, nrows=nrows)
 
     def data_init(self):
@@ -311,8 +373,12 @@ class View(QMainWindow):
             self.end_section = self.max_section
 
         except ValueError:
-            self.signal_error.emit("The data file content dose not match the data structure.")
-            return -1
+            if self.max_line_num <= 0:
+                self.signal_error.emit("The data file content dose not match the data structure.")
+                return -1
+            else:
+                self.end_section = self.max_section
+                return 1
         except FileNotFoundError:
             self.signal_error.emit("Please import data file.")
             return -2
@@ -360,8 +426,8 @@ class View(QMainWindow):
         ## 功能布局
         self.layout_h_config.addLayout(self.layout_v_function, stretch=4)
         self.layout_h_config.addStretch(1)
-        self.layout_h_config.addLayout(self.layout_f_param_config, stretch=2)
-        self.layout_h_config.addLayout(self.layout_v_param_set, stretch=2)
+        self.layout_h_config.addLayout(self.layout_f_param_config, stretch=1)
+        self.layout_h_config.addLayout(self.layout_v_param_set, stretch=1)
         self.layout_h_config.addStretch(1)
         self.layout_h_config.addLayout(self.layout_f_properties_show, stretch=1)
 
@@ -373,6 +439,9 @@ class View(QMainWindow):
         self.input_data_struct_path.setReadOnly(True)
         ## 打开文件按钮
         self.layout_h_function_data_struct_input.addWidget(self.button_open_data_struct_file)
+        ## 编辑按钮
+        self.layout_h_function_data_struct_input.addWidget(self.button_edit_data_struct)
+        ## 生成数据结构按钮
         self.layout_h_function_data_struct_input.addWidget(self.button_generate_data_struct)
         ## 数据文件路径输入框
         self.layout_v_function.addLayout(self.layout_h_function_input)
@@ -381,8 +450,14 @@ class View(QMainWindow):
         self.input_data_path.setReadOnly(True)
         ## 解析按钮
         self.layout_h_function_input.addWidget(self.button_open_file)
-        ## 筛选按钮
+        ## 表头选项
+        self.layout_h_function_input.addWidget(self.checkbox_has_header)
+
+        # 功能按钮布局
         self.layout_v_function.addLayout(self.layout_h_function_buttons)
+        ## 刷新按钮
+        self.layout_h_function_buttons.addWidget(self.button_refresh)
+        ## 筛选按钮
         self.layout_h_function_buttons.addWidget(self.button_filter)
         self.button_filter.setEnabled(False)
         ## 终止按钮
@@ -399,6 +474,7 @@ class View(QMainWindow):
         # 数据展示布局
         self.layout_f_properties_show.addRow("Section", self.label_section_progress)
         self.layout_f_properties_show.addRow("Line", self.label_max_line_num)
+        self.layout_f_properties_show.addRow("Current Line", self.label_current_line_num)
 
         # 翻页布局
         self.layout_h_page.addWidget(self.button_previous)
@@ -420,7 +496,7 @@ class View(QMainWindow):
     # 更新data_struct时清空缓存
     def draw_filter_dialog(self):
         # 筛选条件对话框
-        dialog_filter = FilterDialog(self)
+        dialog_filter = FunctionDialog(self)
         dialog_filter.setModal(True)
         dialog_filter.setWindowTitle("Filter")
 
@@ -503,7 +579,63 @@ class View(QMainWindow):
         dialog_filter.rejected.connect(self.slot_exit_filter)
         ## 操作信号绑定
         dialog_filter.setMouseTracking(True)
-        dialog_filter.signal_configuring.connect(self.slot_configure_filter)
+        self.slot_configure_filter()
+
+    def draw_data_struct_edit_dialog(self):
+        # 筛选条件对话框
+        dialog_edit = FunctionDialog(self, 400, 400)
+        dialog_edit.setModal(True)
+        dialog_edit.setWindowTitle("Data Struct Editor")
+
+        widget_form = QWidget()
+
+        # 滚动区域
+        scroll_area_filter = QScrollArea()
+        # 筛选对话框布局
+        ## 总体布局
+        layout_h_dialog = QHBoxLayout()
+        ### 按钮布局
+        layout_v_button = QVBoxLayout()
+        ### 条件表单布局
+        layout_f_edit = QFormLayout()
+
+        # 布局配置
+        dialog_edit.setLayout(layout_h_dialog)
+        widget_form.setLayout(layout_f_edit)
+
+        layout_h_dialog.addWidget(scroll_area_filter)
+        layout_h_dialog.addLayout(layout_v_button)
+
+        # 按钮
+        layout_v_button.addWidget(self.button_save)
+        layout_v_button.addWidget(self.button_recover_struct)
+
+        # 表单
+        if len(self.combobox_edit_cache) == 0:
+            for (key, value) in self.data_struct.items():
+                combobox_edit = QComboBox()
+
+                combobox_edit.addItems(self.basic_data_type)
+                combobox_edit.setCurrentText(value)
+
+                layout_f_edit.addRow(key, combobox_edit)
+
+                # 记录缓存
+                self.combobox_edit_cache[key] = combobox_edit
+        else:
+            for (key, value) in self.data_struct.items():
+                layout_f_edit.addRow(key, self.combobox_edit_cache[key])
+
+        ## 表单滚动
+        scroll_area_filter.setWidget(widget_form)
+        scroll_area_filter.setWidgetResizable(True)
+
+        dialog_edit.open()
+        ## 关闭信号绑定
+        dialog_edit.rejected.connect(self.slot_exit_editor)
+        ## 操作信号绑定
+        dialog_edit.setMouseTracking(True)
+        self.slot_configure_editor()
 
     def redraw_table_widget(self):
         table_widget = self.table_widget
@@ -527,6 +659,9 @@ class View(QMainWindow):
         self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
         self.layout_v_main.replaceWidget(table_widget, self.table_widget)
+
+        # 连接信号槽
+        self.table_widget.cellClicked.connect(self.slot_current_line_update)
 
         self.table_init()
 
@@ -556,8 +691,11 @@ class View(QMainWindow):
         self.button_previous.setEnabled(state)
 
         # self.button_filter.setEnabled(state)
+        self.button_refresh.setEnabled(state)
         self.button_abort.setEnabled(not state)
         self.button_open_data_struct_file.setEnabled(state)
+        self.button_generate_data_struct.setEnabled(state and self.has_header)
+        self.button_edit_data_struct.setEnabled(state)
         self.button_open_file.setEnabled(state)
 
         self.button_execute.setEnabled(state)
@@ -567,28 +705,48 @@ class View(QMainWindow):
         self.button_apply_param.setEnabled(state)
         self.button_reset_param.setEnabled(state)
 
+        self.checkbox_has_header.setEnabled(state)
+
     def communicate(self):
         # 文件对话框
         ## 数据结构
         self.button_open_data_struct_file.clicked.connect(self.slot_data_struct_file_select)
         ## 生成数据结构
         self.button_generate_data_struct.clicked.connect(self.slot_generate_data_struct)
-        ## 选择数据结构后筛选按钮可用
-        self.input_data_struct_path.textChanged.connect(lambda text: self.button_filter.setEnabled(True))
+        ## 编辑数据结构
+        self.button_edit_data_struct.clicked.connect(self.draw_data_struct_edit_dialog)
+        ## 选择数据结构后按钮可用
+        self.input_data_struct_path.textChanged.connect(lambda text: self.button_generate_data_struct.setEnabled(True))
+        self.input_data_struct_path.textChanged.connect(lambda text: self.button_edit_data_struct.setEnabled(True))
         ## 数据
         self.button_open_file.clicked.connect(self.slot_file_select)
+        ## 存在表头
+        self.checkbox_has_header.stateChanged.connect(self.slot_has_header)
+
+        # 编辑对话框
+        ## 保存
+        self.button_save.clicked.connect(self.slot_save_struct)
+        ## 恢复
+        self.button_recover_struct.clicked.connect(self.slot_recover_struct)
 
         # 打开筛选条件对话框
         self.button_filter.clicked.connect(self.draw_filter_dialog)
+        ## 选择数据结构后按钮可用
+        self.input_data_struct_path.textChanged.connect(lambda text: self.button_filter.setEnabled(True))
 
-        # 全选按钮
+        # 刷新数据
+        self.button_refresh.clicked.connect(self.slot_execute_filter)
+
+        # 筛选对话框
+        ## 全选按钮
         self.checkbox_select_all.stateChanged.connect(self.slot_select_all)
-        # 执行条件筛选
+        ## 执行条件筛选
         self.button_execute.clicked.connect(self.slot_execute_filter)
-        # 重置
+        ## 重置
         self.button_reset_filter.clicked.connect(self.slot_reset_filter)
-        # 恢复
+        ## 恢复
         self.button_recover_filter.clicked.connect(self.slot_recover_filter)
+
         # 终止数据读取
         self.button_abort.clicked.connect(self.slot_abort)
 
@@ -621,21 +779,12 @@ class View(QMainWindow):
 
         self.data_struct_path = file_path
 
-        self.combobox_condition_cache = {}
-        self.input_condition_cache = {}
-        self.checkbox_condition_cache = {}
-        self.label_condition_cache = {}
-
-        self.combobox_condition_recover_cache = {}
-        self.input_condition_recover_cache = {}
-        self.checkbox_condition_recover_cache = {}
-        self.label_condition_recover_cache = {}
-
+        self.data_struct_reset()
         self.data_struct_init()
 
         # 缓存
         with open(file="./cache.json", mode='w+') as cache_json:
-            json.dump(obj={'data_struct_path': self.data_struct_path}, fp=cache_json)
+            json.dump(obj={'data_struct_path': self.data_struct_path, 'data_path': self.data_path}, fp=cache_json)
 
         # self.redraw_data_related()
         self.current_data_struct_path = file_path
@@ -649,7 +798,24 @@ class View(QMainWindow):
         self.input_data_path.setText(file_path)
         self.redraw_data_related()
 
+        # 缓存
+        with open(file="./cache.json", mode='w+') as cache_json:
+            json.dump(obj={'data_struct_path': self.data_struct_path, 'data_path': self.data_path}, fp=cache_json)
+
         self.current_data_path = file_path
+
+    def slot_has_header(self, state):
+        self.has_header = state
+        self.button_generate_data_struct.setEnabled(state)
+
+        if self.max_line_num > 0:
+            if state:
+                self.max_line_num -= 1
+            else:
+                self.max_line_num += 1
+
+        self.max_section = math.ceil(self.max_line_num / self.page_capacity)
+        self.label_max_line_num.setText(str(self.max_line_num))
 
     def slot_execute_filter(self):
         # 重置所有异常提示
@@ -672,6 +838,15 @@ class View(QMainWindow):
 
     def slot_configure_filter(self):
         self.label_status.setText("Configuring filter...")
+
+    def slot_exit_editor(self):
+        self.label_status.setText("Finished.")
+
+    def slot_configure_editor(self):
+        self.label_status.setText("Configuring editor...")
+
+    def slot_current_line_update(self, row, column):
+        self.label_current_line_num.setText(str(self.current_line_num + row))
 
     def slot_between_selected(self, text, input, data_type):
         if text == "between":
@@ -710,6 +885,24 @@ class View(QMainWindow):
                 self.combobox_condition_cache[key].setCurrentIndex(self.combobox_condition_recover_cache[key])
             if len(self.input_condition_recover_cache) > 0:
                 self.input_condition_cache[key].setText(self.input_condition_recover_cache[key])
+
+    def slot_save_struct(self):
+        for key in self.data_struct.keys():
+            self.data_struct[key] = self.combobox_edit_cache[key].currentText()
+            self.combobox_edit_recover_cache[key] = self.data_struct[key]
+            # 筛选界面占位符修改
+            if len(self.input_condition_cache) > 0:
+                self.input_condition_cache[key].setPlaceholderText(self.data_struct[key])
+
+        with open(self.data_struct_path, mode="w+") as data_struct_file:
+            json.dump(obj=self.data_struct, fp=data_struct_file)
+
+        self.data_struct_init()
+
+    def slot_recover_struct(self):
+        if len(self.combobox_edit_recover_cache) > 0:
+            for (key, value) in self.data_struct.items():
+                self.combobox_edit_cache[key].setCurrentText(self.combobox_edit_recover_cache[key])
 
     def slot_page_down(self):
         if self.current_section >= self.max_section:
@@ -756,13 +949,14 @@ class View(QMainWindow):
 
     def slot_data_init_complete(self, errcode):
         self.page_init()
-        if errcode != 0:
+        if errcode < 0:
             self.is_initialized = False
             self.redraw_table_widget()
             self.progress_bar_filter.hide()
             self.enable_buttons(True)
             return
-
+        if errcode > 0:
+            QMessageBox.warning(self, "Warning", "The data file contains incomplete lines.")
         self.is_initialized = True
         self.spinbox_page_capacity.setValue(self.page_capacity)
         self.spinbox_begin_section.setMaximum(self.max_section)
@@ -779,6 +973,9 @@ class View(QMainWindow):
         self.progress_bar_filter.setValue(row_count)
         self.label_section_progress.setText(str(self.current_section) + '/' + str(self.max_section))
         self.label_max_line_num.setText(str(self.max_line_num))
+        if self.current_section > 0:
+            self.current_line_num = (self.page_num - 1) * self.page_capacity + 1
+            self.label_current_line_num.setText(str(self.current_line_num))
 
     def slot_error_handle(self, error_info):
         self.label_status.setText(error_info)
@@ -804,22 +1001,41 @@ class View(QMainWindow):
 
     def slot_reset_param(self):
         self.page_capacity = 1000
+        self.begin_section = 1
+        self.end_section = self.max_section
+
+        self.spinbox_page_capacity.setValue(self.page_capacity)
+        self.spinbox_begin_section.setValue(self.begin_section)
+        self.spinbox_end_section.setValue(self.end_section)
+
         self.slot_apply_param()
 
     def slot_generate_data_struct(self):
         if len(self.input_data_path.text()) == 0:
+            self.label_status.setText("Please import data file first.")
             return
         try:
             header = list(pd.read_csv(self.input_data_path.text(), nrows=0))
+            sample = list(pd.read_csv(self.input_data_path.text(), nrows=1).dtypes)
 
+            # 设置表头
             data_struct = {}
             for i in range(len(header)):
-                data_struct[header[i]] = "str"
+                if sample[i] == 'O':
+                    data_struct[header[i]] = "str"
+                else:
+                    data_struct[header[i]] = str(sample[i])
 
             with open("generate_data_struct.json", mode="w") as generate_file:
                 json.dump(obj=data_struct, fp=generate_file)
 
+            self.current_data_struct_path = "generate_data_struct.json"
             self.data_struct_path = "generate_data_struct.json"
+            # 缓存
+            with open(file="./cache.json", mode='w+') as cache_json:
+                json.dump(obj={'data_struct_path': self.data_struct_path, 'data_path': self.data_path}, fp=cache_json)
+
+            self.data_struct_reset()
             self.data_struct_init()
 
         except FileNotFoundError:
@@ -836,6 +1052,10 @@ class View(QMainWindow):
             self.max_line_num += len(chunk.index)
             self.max_section += 1
             self.signal_progress_update.emit(0)
+
+        if self.has_header and self.max_line_num > 0:
+            self.max_line_num -= 1
+            self.max_section = math.ceil(self.max_line_num / self.page_capacity)
 
     def run_page_filter(self):
         # 界面初始化
@@ -961,8 +1181,15 @@ class View(QMainWindow):
 
             return df
 
+def dump_error(error_info):
+    with open("log.txt", mode="a+") as log:
+        log.write(error_info)
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    view = View()
-    view.showMaximized()
-    sys.exit(app.exec())
+    try:
+        view = View()
+        view.showMaximized()
+        sys.exit(app.exec())
+    except Exception:
+        dump_error(traceback.format_exc())

@@ -1,0 +1,4 @@
+<class 'Exception'>Traceback (most recent call last):
+  File "D:/codes/emfts/quote/tools/quote_viewer/view.py", line 1145, in <module>
+    print(1/0)
+ZeroDivisionError: division by zero
